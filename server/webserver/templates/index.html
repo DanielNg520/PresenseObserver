@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>AMG8833 Thermal Dashboard (in a better than standard CSS formatting)</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+
+<body>
+    <header>
+        <h1>AMG8833 Thermal Dashboard (in a better than standard CSS formatting)</h1>
+        <div id="status" class="status-badge">Connecting...</div>
+    </header>
+
+    <main>
+        <!-- Live Sensor Panel -->
+        <section class="card">
+            <h2>Live Sensor</h2>
+            <div class="live-grid">
+                <div class="heatmap-wrap">
+                    <canvas id="heatmap" width="320" height="320"></canvas>
+                    <div class="temp-scale">
+                        <span id="temp-min">--</span>
+                        <div class="gradient-bar"></div>
+                        <span id="temp-max">--</span>
+                    </div>
+                </div>
+                <div class="live-info">
+                    <div class="info-box">
+                        <label>Thermistor</label>
+                        <span id="thermistor">--</span>
+                        <small>&deg;C</small>
+                    </div>
+                    <div class="info-box prediction-box" id="prediction-box">
+                        <label>Prediction</label>
+                        <span id="prediction">--</span>
+                    </div>
+                    <div class="info-box">
+                        <label>Confidence</label>
+                        <span id="confidence">--</span>
+                    </div>
+                    <div class="info-box">
+                        <label>Device MAC</label>
+                        <span id="mac" class="mono">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="btn-get-one" onclick="sendCommand('get_one')">Get One</button>
+                <button id="btn-start" onclick="sendCommand('start_continuous')">Start Continuous</button>
+                <button id="btn-stop" onclick="sendCommand('stop')" class="btn-danger">Stop</button>
+            </div>
+        </section>
+
+        <!-- Database Readings Panel -->
+        <section class="card">
+            <h2>Stored Readings</h2>
+            <div class="db-controls">
+                <input id="filter-mac" type="text" placeholder="Filter by MAC address..." />
+                <button onclick="loadReadings()">Refresh</button>
+                <button onclick="clearFilter()">Clear Filter</button>
+            </div>
+            <div id="readings-container">
+                <p class="empty-msg">No readings loaded yet.</p>
+            </div>
+        </section>
+
+        <!-- Devices Panel -->
+        <section class="card">
+            <h2>Registered Devices</h2>
+            <button onclick="loadDevices()">Refresh</button>
+            <div id="devices-container">
+                <p class="empty-msg">No devices found.</p>
+            </div>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', path='script.js') }}"></script>
+</body>
+
+</html>

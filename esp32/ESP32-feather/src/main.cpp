@@ -1,10 +1,29 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_AMG88xx.h>
 
 // Adafruit Feather ESP32-S3 (8MB flash, 2MB QSPI PSRAM).
 // Onboard red LED is on GPIO13 (LED_BUILTIN) — used here as a scan heartbeat.
 
 static const uint32_t SCAN_INTERVAL_MS = 30000;
+
+// Guest network to join, secured with a WPA passphrase.
+static const char* GUEST_SSID = "RESNET-GUEST-DEVICE";
+static const char* GUEST_PASSPHRASE = "ResnetConnect";
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+
+// AMG8833 8x8 thermal sensor (I2C, default address 0x69 on the Adafruit
+// breakout; 0x68 if the ADDR jumper is bridged).
+static Adafruit_AMG88xx amg;
+static bool amgReady = false;
+
+// Connectivity probe. Uses a small endpoint that returns HTTP 204 with an
+// empty body when the internet is reachable (Google's "generate_204").
+// A captive portal will instead return a redirect / login page (not 204),
+// which lets us distinguish "connected to AP" from "actually online".
+static const char* CONNECTIVITY_URL = "http://connectivitycheck.gstatic.com/generate_204";
 
 static const char* authModeName(wifi_auth_mode_t mode) {
     switch (mode) {
@@ -19,6 +38,26 @@ static const char* authModeName(wifi_auth_mode_t mode) {
         case WIFI_AUTH_WAPI_PSK:        return "WAPI-PSK";
         default:                        return "unknown";
     }
+}
+
+// Probe the I2C bus for the AMG8833 thermal sensor. Tries the two possible
+// addresses and reports whether the sensor was detected. Sets amgReady.
+static void detectThermalSensor() {
+    Serial.println("\nDetecting AMG8833 thermal sensor...");
+
+    const uint8_t addresses[] = {AMG88xx_ADDRESS, 0x68};  // 0x69 default, 0x68 alt
+    for (uint8_t addr : addresses) {
+        if (amg.begin(addr)) {
+            amgReady = true;
+            Serial.printf("  AMG8833 found at I2C address 0x%02X.\n", addr);
+            delay(100);  // sensor boot time before first read
+            Serial.printf("  Thermistor: %.2f C\n", amg.readThermistor());
+            return;
+        }
+    }
+
+    amgReady = false;
+    Serial.println("  AMG8833 NOT detected — check wiring (SDA/SCL, 3V3, GND).");
 }
 
 static void printMacAddress() {
@@ -59,6 +98,76 @@ static void scanNetworks() {
     WiFi.scanDelete();
 }
 
+// Connect to the open guest network. Returns true once an IP is obtained.
+static bool connectToGuest() {
+    Serial.printf("\nConnecting to network \"%s\"...\n", GUEST_SSID);
+
+    WiFi.begin(GUEST_SSID, GUEST_PASSPHRASE);  // WPA-secured network
+
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));  // blink while joining
+        Serial.print('.');
+        delay(300);
+    }
+    Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.printf("Failed to join \"%s\" within %lu s.\n",
+                      GUEST_SSID, (unsigned long)(WIFI_CONNECT_TIMEOUT_MS / 1000));
+        return false;
+    }
+
+    digitalWrite(LED_BUILTIN, HIGH);  // solid = associated
+    Serial.printf("Joined \"%s\".\n", GUEST_SSID);
+    Serial.printf("  IP address : %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  Gateway    : %s\n", WiFi.gatewayIP().toString().c_str());
+    Serial.printf("  DNS        : %s\n", WiFi.dnsIP().toString().c_str());
+    Serial.printf("  RSSI       : %d dBm\n", WiFi.RSSI());
+    return true;
+}
+
+// Probe for real internet access. Distinguishes an open internet path from a
+// captive portal that has associated us but not let traffic through.
+static void checkInternet() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Not associated — skipping internet check.");
+        return;
+    }
+
+    Serial.printf("Checking internet via %s ...\n", CONNECTIVITY_URL);
+
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    // Don't auto-follow redirects: a redirect is the signal of a captive portal.
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+    if (!http.begin(CONNECTIVITY_URL)) {
+        Serial.println("  RESULT: HTTP client init failed.");
+        return;
+    }
+
+    int code = http.GET();
+    if (code == 204) {
+        Serial.println("  RESULT: ONLINE — internet reachable (HTTP 204).");
+    } else if (code > 0 && (code == 301 || code == 302 || code == 307)) {
+        String loc = http.getLocation();
+        Serial.printf("  RESULT: CAPTIVE PORTAL — redirected (HTTP %d) to %s\n",
+                      code, loc.c_str());
+        Serial.println("          Associated but not online (login/accept-terms required).");
+    } else if (code > 0) {
+        Serial.printf("  RESULT: CAPTIVE/UNEXPECTED — got HTTP %d (expected 204).\n", code);
+    } else {
+        Serial.printf("  RESULT: OFFLINE — request failed (%s).\n",
+                      http.errorToString(code).c_str());
+    }
+
+    http.end();
+}
+
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
@@ -69,6 +178,9 @@ void setup() {
     Serial.println();
     Serial.println("=== ESP32-S3 Feather WiFi Troubleshoot ===");
 
+    Wire.begin();
+    detectThermalSensor();
+
     WiFi.mode(WIFI_STA);
     WiFi.disconnect(true);
     delay(100);
@@ -76,10 +188,20 @@ void setup() {
     printMacAddress();
     scanNetworks();
 
-    Serial.printf("\nRescanning every %lu seconds.\n", (unsigned long)(SCAN_INTERVAL_MS / 1000));
+    if (connectToGuest()) {
+        checkInternet();
+    }
+
+    Serial.printf("\nRe-checking every %lu seconds.\n", (unsigned long)(SCAN_INTERVAL_MS / 1000));
 }
 
 void loop() {
     delay(SCAN_INTERVAL_MS);
-    scanNetworks();
+
+    // Reconnect if we dropped, then re-probe internet reachability.
+    if (WiFi.status() != WL_CONNECTED) {
+        scanNetworks();
+        connectToGuest();
+    }
+    checkInternet();
 }

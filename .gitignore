@@ -1,0 +1,9 @@
+Docs/*
+CLAUDE.md
+MIGRATION_NOTES*
+
+# macOS
+.DS_Store
+
+# PlatformIO
+.pio/

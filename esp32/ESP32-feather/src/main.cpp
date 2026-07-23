@@ -8,11 +8,11 @@
 // Onboard red LED is on GPIO13 (LED_BUILTIN) — used here as a scan heartbeat.
 
 static const uint32_t SCAN_INTERVAL_MS = 30000;
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 
 // Guest network to join, secured with a WPA passphrase.
 static const char* GUEST_SSID = "RESNET-GUEST-DEVICE";
 static const char* GUEST_PASSPHRASE = "ResnetConnect";
-static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 
 // AMG8833 8x8 thermal sensor (I2C, default address 0x69 on the Adafruit
 // breakout; 0x68 if the ADDR jumper is bridged).
@@ -98,7 +98,7 @@ static void scanNetworks() {
     WiFi.scanDelete();
 }
 
-// Connect to the open guest network. Returns true once an IP is obtained.
+// Connect to the guest network. Returns true once an IP is obtained.
 static bool connectToGuest() {
     Serial.printf("\nConnecting to network \"%s\"...\n", GUEST_SSID);
 
@@ -173,7 +173,12 @@ void setup() {
     digitalWrite(LED_BUILTIN, LOW);
 
     Serial.begin(115200);
-    delay(2000);
+    // Wait up to 3s for the USB-CDC host to attach so early output isn't lost.
+    uint32_t serialWait = millis();
+    while (!Serial && (millis() - serialWait) < 3000) {
+        delay(10);
+    }
+    delay(500);
 
     Serial.println();
     Serial.println("=== ESP32-S3 Feather WiFi Troubleshoot ===");
@@ -188,6 +193,7 @@ void setup() {
     printMacAddress();
     scanNetworks();
 
+    WiFi.setAutoReconnect(true);
     if (connectToGuest()) {
         checkInternet();
     }
@@ -196,12 +202,14 @@ void setup() {
 }
 
 void loop() {
-    delay(SCAN_INTERVAL_MS);
-
-    // Reconnect if we dropped, then re-probe internet reachability.
     if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\nWiFi disconnected, retrying...");
         scanNetworks();
         connectToGuest();
+    } else {
+        Serial.printf("WiFi OK — IP %s, RSSI %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
     }
     checkInternet();
+    delay(SCAN_INTERVAL_MS);
 }

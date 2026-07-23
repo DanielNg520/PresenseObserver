@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include "secrets.h"  // defines WIFI_SSID and WIFI_PASSWORD (git-ignored)
 
 static const uint32_t SCAN_INTERVAL_MS = 30000;
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 
 static const char* authModeName(wifi_auth_mode_t mode) {
     switch (mode) {
@@ -54,9 +56,39 @@ static void scanNetworks() {
     WiFi.scanDelete();
 }
 
+static bool connectWiFi() {
+    Serial.printf("\nConnecting to \"%s\" (WPA2-PSK)...\n", WIFI_SSID);
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.printf("Failed to connect (status %d).\n", WiFi.status());
+        return false;
+    }
+
+    Serial.println("Connected!");
+    Serial.printf("  IP address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  Gateway:    %s\n", WiFi.gatewayIP().toString().c_str());
+    Serial.printf("  RSSI:       %d dBm\n", WiFi.RSSI());
+    return true;
+}
+
 void setup() {
     Serial.begin(115200);
-    delay(2000);
+    // Wait up to 3s for the USB-CDC host to attach so early output isn't lost.
+    uint32_t serialWait = millis();
+    while (!Serial && (millis() - serialWait) < 3000) {
+        delay(10);
+    }
+    delay(500);
 
     Serial.println();
     Serial.println("=== ESP32 WiFi Troubleshoot ===");
@@ -68,10 +100,17 @@ void setup() {
     printMacAddress();
     scanNetworks();
 
-    Serial.printf("\nRescanning every %lu seconds.\n", (unsigned long)(SCAN_INTERVAL_MS / 1000));
+    WiFi.setAutoReconnect(true);
+    connectWiFi();
 }
 
 void loop() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\nWiFi disconnected, retrying...");
+        connectWiFi();
+    } else {
+        Serial.printf("WiFi OK — IP %s, RSSI %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    }
     delay(SCAN_INTERVAL_MS);
-    scanNetworks();
 }

@@ -20,12 +20,14 @@ public:
   ECE140_WIFI();
 
   /**
-   * @brief Connect to a regular WiFi network
+   * @brief Connect to a regular WiFi network. An empty password joins an
+   *        open network (single-arg begin); otherwise WPA-PSK is used.
    *
    * @param ssid The SSID of the WiFi network
-   * @param password The password of the WiFi network
+   * @param password The password of the WiFi network ("" for an open network)
+   * @return true once associated with an IP, false if the timeout elapsed
    */
-  void connectToWiFi(String ssid, String password);
+  bool connectToWiFi(String ssid, String password);
 
   /**
    * @brief Connect to a WPA Enterprise network
@@ -33,8 +35,9 @@ public:
    * @param ssid The SSID of the WiFi network
    * @param username The username for WPA Enterprise
    * @param password The password for WPA Enterprise
+   * @return true once associated with an IP, false if the timeout elapsed
    */
-  void connectToWPAEnterprise(String ssid, String username, String password);
+  bool connectToWPAEnterprise(String ssid, String username, String password);
 };
 
 #endif

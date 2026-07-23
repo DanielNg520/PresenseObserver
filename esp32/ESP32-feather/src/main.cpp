@@ -10,9 +10,19 @@
 static const uint32_t SCAN_INTERVAL_MS = 30000;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 
-// Guest network to join, secured with a WPA passphrase.
-static const char* GUEST_SSID = "RESNET-GUEST-DEVICE";
-static const char* GUEST_PASSPHRASE = "ResnetConnect";
+// Candidate networks to join, tried in order until one connects. An empty
+// pass ("") means an open network (joined with a single-arg WiFi.begin);
+// a non-empty pass is a WPA passphrase. Order = priority: the first that
+// associates wins, so list the preferred network first.
+struct WifiNet {
+    const char* ssid;
+    const char* pass;  // "" => open network
+};
+static const WifiNet NETWORKS[] = {
+    { "RESNET-GUEST-DEVICE", "ResnetConnect" },
+    { "UCSD-GUEST",          ""              },
+};
+static const size_t NETWORK_COUNT = sizeof(NETWORKS) / sizeof(NETWORKS[0]);
 
 // AMG8833 8x8 thermal sensor (I2C, default address 0x69 on the Adafruit
 // breakout; 0x68 if the ADDR jumper is bridged).
@@ -98,11 +108,17 @@ static void scanNetworks() {
     WiFi.scanDelete();
 }
 
-// Connect to the guest network. Returns true once an IP is obtained.
-static bool connectToGuest() {
-    Serial.printf("\nConnecting to network \"%s\"...\n", GUEST_SSID);
+// Attempt to join a single network. Returns true once an IP is obtained.
+static bool connectToGuest(const WifiNet& net) {
+    bool open = (net.pass == nullptr || net.pass[0] == '\0');
+    Serial.printf("\nConnecting to network \"%s\" (%s)...\n",
+                  net.ssid, open ? "open" : "WPA");
 
-    WiFi.begin(GUEST_SSID, GUEST_PASSPHRASE);  // WPA-secured network
+    if (open) {
+        WiFi.begin(net.ssid);            // open network: SSID only
+    } else {
+        WiFi.begin(net.ssid, net.pass);  // WPA-secured network
+    }
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED &&
@@ -116,17 +132,30 @@ static bool connectToGuest() {
     if (WiFi.status() != WL_CONNECTED) {
         digitalWrite(LED_BUILTIN, LOW);
         Serial.printf("Failed to join \"%s\" within %lu s.\n",
-                      GUEST_SSID, (unsigned long)(WIFI_CONNECT_TIMEOUT_MS / 1000));
+                      net.ssid, (unsigned long)(WIFI_CONNECT_TIMEOUT_MS / 1000));
         return false;
     }
 
     digitalWrite(LED_BUILTIN, HIGH);  // solid = associated
-    Serial.printf("Joined \"%s\".\n", GUEST_SSID);
+    Serial.printf("Joined \"%s\".\n", net.ssid);
     Serial.printf("  IP address : %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("  Gateway    : %s\n", WiFi.gatewayIP().toString().c_str());
     Serial.printf("  DNS        : %s\n", WiFi.dnsIP().toString().c_str());
     Serial.printf("  RSSI       : %d dBm\n", WiFi.RSSI());
     return true;
+}
+
+// Try each candidate network in order; return true on the first that joins.
+static bool connectToAnyGuest() {
+    for (size_t i = 0; i < NETWORK_COUNT; i++) {
+        WiFi.disconnect(true);  // clear any half-finished prior association
+        delay(100);
+        if (connectToGuest(NETWORKS[i])) {
+            return true;
+        }
+    }
+    Serial.println("\nNo candidate network could be joined.");
+    return false;
 }
 
 // Probe for real internet access. Distinguishes an open internet path from a
@@ -194,7 +223,7 @@ void setup() {
     scanNetworks();
 
     WiFi.setAutoReconnect(true);
-    if (connectToGuest()) {
+    if (connectToAnyGuest()) {
         checkInternet();
     }
 
@@ -205,7 +234,7 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\nWiFi disconnected, retrying...");
         scanNetworks();
-        connectToGuest();
+        connectToAnyGuest();
     } else {
         Serial.printf("WiFi OK — IP %s, RSSI %d dBm\n",
                       WiFi.localIP().toString().c_str(), WiFi.RSSI());

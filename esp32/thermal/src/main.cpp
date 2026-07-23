@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <Adafruit_AMG88xx.h>
 
 #include <TensorFlowLite_ESP32.h>
@@ -35,6 +36,96 @@ const char* TOPIC_PREFIX = MQTT_TOPIC;
 
 ECE140_WIFI wifi;
 ECE140_MQTT mqtt(CLIENT_ID, TOPIC_PREFIX);
+
+
+// Candidate networks, tried in order until one associates. The primary
+// network comes from the build config (.env): it is treated as WPA2-Enterprise
+// when no non-enterprise password was supplied, otherwise as WPA-PSK. An
+// open campus network (UCSD-GUEST) is listed as a fallback. Order = priority.
+
+enum WifiAuth { AUTH_OPEN, AUTH_PSK, AUTH_ENTERPRISE };
+
+struct WifiNet {
+    const char* ssid;
+    WifiAuth    auth;
+    const char* user;  // WPA2-Enterprise identity; nullptr otherwise
+    const char* pass;  // PSK / enterprise secret; "" for an open network
+};
+
+// Try each candidate in order; return true on the first that joins.
+static bool connectToAnyWiFi() {
+    bool primaryEnterprise = (strlen(nonEnterpriseWifiPassword) < 2);
+
+    const WifiNet networks[] = {
+        // Primary network injected from .env by pre_extra_script.py.
+        { wifiSsid,
+          primaryEnterprise ? AUTH_ENTERPRISE : AUTH_PSK,
+          ucsdUsername,
+          primaryEnterprise ? ucsdPassword.c_str() : nonEnterpriseWifiPassword },
+        // Open campus guest fallback.
+        { "UCSD-GUEST", AUTH_OPEN, nullptr, "" },
+    };
+
+    for (const WifiNet& net : networks) {
+        bool ok = false;
+        switch (net.auth) {
+            case AUTH_OPEN:       ok = wifi.connectToWiFi(net.ssid, ""); break;
+            case AUTH_PSK:        ok = wifi.connectToWiFi(net.ssid, net.pass); break;
+            case AUTH_ENTERPRISE: ok = wifi.connectToWPAEnterprise(net.ssid, net.user, net.pass); break;
+        }
+        if (ok) return true;
+    }
+
+    Serial.println("[WiFi] No candidate network could be joined.");
+    return false;
+}
+
+// Connectivity probe. Returns HTTP 204 with an empty body when the internet is
+// reachable; a captive portal instead returns a redirect / login page. Lets us
+// distinguish "associated with an AP" from "actually online" (e.g. UCSD-GUEST,
+// which associates but blocks traffic behind an accept-terms portal).
+static const char* CONNECTIVITY_URL = "http://connectivitycheck.gstatic.com/generate_204";
+
+// Probe for real internet access. Returns true only if we get a clean 204.
+static bool checkInternet() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[Net] Not associated — skipping internet check.");
+        return false;
+    }
+
+    Serial.printf("[Net] Checking internet via %s ...\n", CONNECTIVITY_URL);
+
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    // Don't auto-follow redirects: a redirect is the signal of a captive portal.
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+    if (!http.begin(CONNECTIVITY_URL)) {
+        Serial.println("[Net]   RESULT: HTTP client init failed.");
+        return false;
+    }
+
+    bool online = false;
+    int code = http.GET();
+    if (code == 204) {
+        Serial.println("[Net]   RESULT: ONLINE — internet reachable (HTTP 204).");
+        online = true;
+    } else if (code == 301 || code == 302 || code == 307) {
+        String loc = http.getLocation();
+        Serial.printf("[Net]   RESULT: CAPTIVE PORTAL — redirected (HTTP %d) to %s\n",
+                      code, loc.c_str());
+        Serial.println("[Net]           Associated but not online (login/accept-terms required).");
+    } else if (code > 0) {
+        Serial.printf("[Net]   RESULT: CAPTIVE/UNEXPECTED — got HTTP %d (expected 204).\n", code);
+    } else {
+        Serial.printf("[Net]   RESULT: OFFLINE — request failed (%s).\n",
+                      http.errorToString(code).c_str());
+    }
+
+    http.end();
+    return online;
+}
 
 
 // Sensor
@@ -279,12 +370,16 @@ void setup() {
 
     // WiFi (pattern from TA7 starter + TA4 challenge2)
     Serial.println("[Setup] Connecting to WiFi...");
-    if (strlen(nonEnterpriseWifiPassword) < 2) {
-        wifi.connectToWPAEnterprise(wifiSsid, ucsdUsername, ucsdPassword);
-    } else {
-        wifi.connectToWiFi(wifiSsid, nonEnterpriseWifiPassword);
-    }
+    connectToAnyWiFi();
     Serial.print("[Setup] MAC address: "); Serial.println(WiFi.macAddress());
+
+    // Verify real internet access before attempting MQTT. A captive portal
+    // (e.g. UCSD-GUEST) can associate us without letting TLS traffic through,
+    // in which case the MQTT connect below would loop indefinitely.
+    if (!checkInternet()) {
+        Serial.println("[Setup] WARNING: no internet path — MQTT connect may stall "
+                       "(captive portal / offline).");
+    }
 
     // MQTT (pattern from TA4 challenge2)
     while (!mqtt.connectToBroker()) {

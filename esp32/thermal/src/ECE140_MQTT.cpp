@@ -87,6 +87,6 @@ void ECE140_MQTT::loop() {
     if (!_mqttClient->connected()) {
         Serial.println("[MQTT] Connection lost. Attempting to reconnect...");
         delay(1000);
-        connectToBroker();
+        connectToBroker(_port);   // reconnect on the same port used originally
     }
 }

@@ -21,11 +21,11 @@ pio run --target upload --target monitor -e adafruit_feather_esp32s3
 
 - `src/main.cpp` — pipeline: Wi-Fi/MQTT bring-up, presence state machine, event lifecycle.
 - `src/Microphone.*` — optional INMP441 (guarded by `-D USE_MIC`; see `platformio.ini`).
-- `src/ECE140_WIFI.*` — Wi-Fi with multi-SSID failover + captive-portal recovery.
-- `src/ECE140_MQTT.*` — PubSubClient wrapper that restores callback + subscriptions on reconnect.
+- `src/WifiConnection.*` — Wi-Fi with multi-SSID failover + captive-portal recovery.
+- `src/MqttClient.*` — PubSubClient wrapper that restores callback + subscriptions on reconnect.
 - `include/model_data.h`, `include/model_params.h` — the TFLite blob + scaler params.
 
-The MQTT broker host is hardcoded in `include/ECE140_MQTT.h`. Optional mic pins
+The MQTT broker host is hardcoded in `include/MqttClient.h`. Optional mic pins
 default to `WS=12 SCK=13 SD=14` (override with `-D MIC_WS=` etc.).
 
 See [`../../DEPLOYMENT_GUIDE.md`](../../DEPLOYMENT_GUIDE.md) for the full setup.

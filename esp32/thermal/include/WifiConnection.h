@@ -1,5 +1,5 @@
-#ifndef ECE140_WIFI_h
-#define ECE140_WIFI_h
+#ifndef WIFI_CONNECTION_H
+#define WIFI_CONNECTION_H
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -8,16 +8,17 @@
 #include <lwip/dns.h>
 
 /**
- * @brief This is the class to connect to a wifi network.
+ * @brief Connects the device to a WiFi network.
  *
- * You can either connect to a regular wifi network or a WPA Enterprise network.
+ * Supports open, WPA-PSK, and WPA2-Enterprise networks. Each connect attempt
+ * is bounded by a timeout so callers can fail over to another network.
  */
-class ECE140_WIFI {
+class WifiConnection {
 public:
   /**
-   * @brief Construct a new ECE140_WIFI object
+   * @brief Construct a new WifiConnection object
    */
-  ECE140_WIFI();
+  WifiConnection();
 
   /**
    * @brief Connect to a regular WiFi network. An empty password joins an

@@ -1,5 +1,5 @@
-#ifndef ECE140_MQTT_h
-#define ECE140_MQTT_h
+#ifndef MQTT_CLIENT_H
+#define MQTT_CLIENT_H
 
 #include <Arduino.h>
 #include <PubSubClient.h>
@@ -7,20 +7,21 @@
 #include <vector>
 
 /**
- * @brief This is the class to handle MQTT communications with a public broker.
+ * @brief Thin PubSubClient wrapper for MQTT communication with a broker.
  *
- * This class needs to be initialized with client ID and topic prefix.
- * These parameters will be used for MQTT connection and message publishing.
+ * Initialized with a client ID and a topic prefix used for all publishes and
+ * subscribes. Survives automatic reconnects by restoring the callback and
+ * re-subscribing to remembered topics.
  */
-class ECE140_MQTT {
+class MqttClient {
 public:
     /**
-     * @brief Construct a new ECE140_MQTT object
+     * @brief Construct a new MqttClient object
      *
      * @param clientId Unique identifier for this MQTT client
      * @param topicPrefix Prefix for all topics published by this client
      */
-    ECE140_MQTT(String clientId, String topicPrefix);
+    MqttClient(String clientId, String topicPrefix);
 
     /**
      * @brief Connect to the MQTT broker

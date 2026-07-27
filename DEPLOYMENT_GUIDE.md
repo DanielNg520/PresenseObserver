@@ -122,10 +122,10 @@ It runs **autonomously**: a debounced presence transition starts an event and
 streams frames (see the data-flow above). An optional **INMP441 I2S microphone**
 (`Microphone` module, `-D USE_MIC`) adds a sound level per frame; the firmware
 runs fine without it. `armed` state is persisted in NVS. Helper classes:
-`ECE140_WIFI` (multi-SSID failover + WPA2-Enterprise + captive-portal recovery)
-and `ECE140_MQTT` (PubSubClient wrapper that survives reconnects). Secrets come
-from `.env` at build time via `pre_extra_script.py`; **the broker host is
-hardcoded** in `include/ECE140_MQTT.h`.
+`WifiConnection` (multi-SSID failover + WPA2-Enterprise + captive-portal
+recovery) and `MqttClient` (PubSubClient wrapper that survives reconnects).
+Secrets come from `.env` at build time via `pre_extra_script.py`; **the broker
+host is hardcoded** in `include/MqttClient.h`.
 
 **`esp32/ESP32-feather/` — diagnostics only** (no ML, no MQTT). WiFi scan, join
 `RESNET-GUEST-DEVICE`, captive-portal check, AMG8833 I2C detection.
@@ -533,7 +533,7 @@ DB_HOST=db
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=CHANGE_ME_to_a_long_random_password
-DB_NAME=ta7db
+DB_NAME=presencedb
 
 # --- MQTT ---
 # Option A (Mosquitto): use the service name 'mqtt'
@@ -645,7 +645,7 @@ MQTT_TOPIC=presence/yourname/thermal-suite
 > `UCSD_*` fields; otherwise it uses the normal password. Fill the set you need.
 
 **11b. Point the firmware at your broker.** The broker host is currently
-hardcoded in `esp32/thermal/include/ECE140_MQTT.h`:
+hardcoded in `esp32/thermal/include/MqttClient.h`:
 ```cpp
 const char* _broker = "broker.emqx.io";
 ```
@@ -655,7 +655,7 @@ Change it to:
 - **Option B (HiveMQ):** your cluster host, e.g. `abcdef.s1.eu.hivemq.cloud`,
   port `8883`.
 
-> **Plaintext vs TLS on the device:** the shipped `ECE140_MQTT` uses a plain
+> **Plaintext vs TLS on the device:** the shipped `MqttClient` uses a plain
 > `WiFiClient` on port 1883 with no credentials. To reach a secured broker
 > (either option's 8883) you must switch to `WiFiClientSecure`, load the CA
 > certificate, and set username/password. This is the firmware half of
@@ -828,7 +828,7 @@ real history lives in `events` + `event_frames`.
 
 **Now:** both sides use **plaintext MQTT on port 1883 with no credentials**
 (server default broker `broker.emqx.io`; firmware `WiFiClient` in
-`ECE140_MQTT.cpp`). On a public broker, anyone can read and inject.
+`MqttClient.cpp`). On a public broker, anyone can read and inject.
 
 **Why it matters:** privacy (your thermal data) and control (command injection to
 your device). Required for both Mosquitto-over-internet and HiveMQ Cloud.
@@ -840,7 +840,7 @@ mqtt_client.username_pw_set(os.getenv("MQTT_USER"),
                             os.getenv("MQTT_PASS"))
 mqtt_client.connect(MQTT_BROKER, 8883, 60)              # TLS port
 ```
-**Do — firmware (`ECE140_MQTT`):** switch `_wifiClient` from `WiFiClient` to
+**Do — firmware (`MqttClient`):** switch `_wifiClient` from `WiFiClient` to
 `WiFiClientSecure`, load your CA with `setCACert(ca_cert)` (the `ca.crt` from
 Step 7 A5, or the broker's CA), connect on `8883`, and pass user/pass to
 `_mqttClient->connect(clientId, user, pass)`.
@@ -880,7 +880,7 @@ health endpoint for uptime checks.
   ```bash
   # crontab -e
   0 3 * * * docker compose -f ~/PresenseObserver/server/docker-compose.yml \
-    exec -T db mysqldump -uroot -pYOURPASS ta7db > ~/backups/ta7db_$(date +\%F).sql
+    exec -T db mysqldump -uroot -pYOURPASS presencedb > ~/backups/presencedb_$(date +\%F).sql
   ```
   (Even better: sync `~/backups` to DigitalOcean Spaces / S3.)
 - Add a `GET /health` endpoint returning `{"status":"ok"}` and point an uptime

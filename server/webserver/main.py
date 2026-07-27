@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# TA5 challenge1
+# Configuration
 
 MQTT_BROKER = os.getenv("MQTT_BROKER", "broker.emqx.io")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "ece140a/ta7/autograder")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "presence/observer/node-1")
 MQTT_COMMAND_TOPIC = f"{MQTT_TOPIC}/command"   # legacy command path (unused by firmware now)
 MQTT_DATA_TOPIC = f"{MQTT_TOPIC}/thermal"      # legacy single-reading live heatmap path
 MQTT_EVENT_TOPIC = f"{MQTT_TOPIC}/event"       # event_start / event_end log messages
@@ -27,7 +27,7 @@ DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "ta7db")
+DB_NAME = os.getenv("DB_NAME", "presencedb")
 
 clients: list[WebSocket] = []
 latest_reading = None
@@ -231,7 +231,6 @@ mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
-# TA5 challenge1
 
 async def _send_to_all(msg: str):
     # Iterate a snapshot; prune any sockets that error out so dead clients
@@ -267,7 +266,7 @@ async def broadcast_readings():
         await asyncio.sleep(0.1)
 
 
-# App lifespan - TA5 challenge1
+# App lifespan
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -292,7 +291,7 @@ async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
-# WebSocket - TA5 challenge1
+# WebSocket
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

@@ -1,13 +1,13 @@
-#include "ECE140_WIFI.h"
+#include "WifiConnection.h"
 
 // Give up on a single network after this long so the caller can try the next.
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 
-ECE140_WIFI::ECE140_WIFI() {
-    Serial.println("[ECE140_WIFI] Initialized");
+WifiConnection::WifiConnection() {
+    Serial.println("[WifiConnection] Initialized");
 }
 
-bool ECE140_WIFI::connectToWiFi(String ssid, String password) {
+bool WifiConnection::connectToWiFi(String ssid, String password) {
     bool open = (password.length() == 0);
     Serial.printf("[WiFi] Connecting to \"%s\" (%s)...\n",
                   ssid.c_str(), open ? "open" : "WPA-PSK");
@@ -39,7 +39,7 @@ bool ECE140_WIFI::connectToWiFi(String ssid, String password) {
     return true;
 }
 
-bool ECE140_WIFI::connectToWPAEnterprise(String ssid, String username, String password) {
+bool WifiConnection::connectToWPAEnterprise(String ssid, String username, String password) {
     Serial.printf("[WiFi] Connecting to \"%s\" (WPA2-Enterprise)...\n", ssid.c_str());
 
     WiFi.disconnect(true);

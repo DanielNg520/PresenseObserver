@@ -1,10 +1,10 @@
-// Tech Assignment 7 — Thermal Presence Detection with MQTT
+// Thermal Presence Detection — autonomous event recorder
 //
-// Combines:
-//   - WiFi + MQTT from TA4 challenge2 / TA7 starter
-//   - TFLite inference (setupModel, computeFeatures, runInference) from TA6 lab_challenge
-//   - Full JSON payload (mac_address, pixels, thermistor, prediction, confidence)
-//   - Command handling: get_one, start_continuous, stop
+// Pipeline:
+//   - WiFi (multi-SSID failover + WPA2-Enterprise + captive-portal recovery)
+//   - MQTT publish of presence events and thermal frames
+//   - On-device TFLite inference (setupModel, computeFeatures, runInference)
+//   - Autonomous event recording with an arm/disarm off-switch
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -20,8 +20,8 @@
 #include "tensorflow/lite/micro/micro_error_reporter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
-#include "ECE140_WIFI.h"
-#include "ECE140_MQTT.h"
+#include "WifiConnection.h"
+#include "MqttClient.h"
 #include "Microphone.h"
 #include "model_data.h"
 #include "model_params.h"
@@ -37,8 +37,8 @@ const char* nonEnterpriseWifiPassword = NON_ENTERPRISE_WIFI_PASSWORD;
 const char* CLIENT_ID = MQTT_CLIENT_ID;
 const char* TOPIC_PREFIX = MQTT_TOPIC;
 
-ECE140_WIFI wifi;
-ECE140_MQTT mqtt(CLIENT_ID, TOPIC_PREFIX);
+WifiConnection wifi;
+MqttClient  mqtt(CLIENT_ID, TOPIC_PREFIX);
 Microphone  mic;
 Preferences prefs;
 
@@ -193,7 +193,7 @@ Adafruit_AMG88xx amg;
 float pixels[AMG88xx_PIXEL_ARRAY_SIZE];  // 64 floats
 
 
-// TFLite globals (from TA6 lab_challenge)
+// TFLite globals
 
 constexpr int kTensorArenaSize = 8 * 1024;
 alignas(16) uint8_t tensor_arena[kTensorArenaSize];
@@ -240,7 +240,7 @@ uint32_t lastSampleMs    = 0;
 bool armed = true;
 
 
-// TFLite: setupModel (reused from TA6)
+// TFLite: setupModel
 
 void setupModel() {
     model = tflite::GetModel(model_tflite);
@@ -257,7 +257,7 @@ void setupModel() {
 }
 
 
-// TFLite: largestBlob (reused from TA6)
+// TFLite: largestBlob
 
 int largestBlob(float grid[8][8], float threshold) {
     bool visited[8][8] = {};
@@ -291,7 +291,7 @@ int largestBlob(float grid[8][8], float threshold) {
 }
 
 
-// TFLite: computeFeatures (reused from TA6)
+// TFLite: computeFeatures
 
 void computeFeatures(float* raw_pixels, float* out_features) {
     float grid[8][8];
@@ -385,7 +385,7 @@ void computeFeatures(float* raw_pixels, float* out_features) {
 }
 
 
-// TFLite: runInference (reused from TA6)
+// TFLite: runInference
 
 float runInference(float scaled_features[N_FEATURES]) {
     for (int i = 0; i < N_FEATURES; i++)
@@ -555,7 +555,7 @@ void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    // WiFi (pattern from TA7 starter + TA4 challenge2)
+    // WiFi
     Serial.println("[Setup] Connecting to WiFi...");
     setupWiFi();
     Serial.print("[Setup] MAC address: "); Serial.println(WiFi.macAddress());
@@ -568,7 +568,7 @@ void setup() {
                        "(captive portal / offline).");
     }
 
-    // MQTT (pattern from TA4 challenge2)
+    // MQTT
     while (!mqtt.connectToBroker()) {
         Serial.println("[Setup] MQTT connect failed, retrying...");
         delay(1000);
@@ -581,7 +581,7 @@ void setup() {
     mqtt.setCallback(commandCallback);
     mqtt.subscribeTopic("command");
 
-    // AMG8833 sensor (pattern from TA4 challenge2)
+    // AMG8833 sensor
     Wire.begin();
     if (!amg.begin()) {
         while (1) {
@@ -598,7 +598,7 @@ void setup() {
         Serial.println("[Setup] Microphone not available — continuing without it.");
     }
 
-    // TFLite model (from TA6 lab_challenge)
+    // TFLite model
     setupModel();
 
     publishState();  // announce armed/disarmed so the dashboard starts in sync

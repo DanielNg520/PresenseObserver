@@ -10,6 +10,8 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiManager.h>   // captive-portal WiFi provisioning (tzapu/WiFiManager)
+#include <Preferences.h>   // NVS storage for portal-configured credentials
 #include <Adafruit_AMG88xx.h>
 
 #include <TensorFlowLite_ESP32.h>
@@ -20,6 +22,7 @@
 
 #include "ECE140_WIFI.h"
 #include "ECE140_MQTT.h"
+#include "Microphone.h"
 #include "model_data.h"
 #include "model_params.h"
 
@@ -36,12 +39,19 @@ const char* TOPIC_PREFIX = MQTT_TOPIC;
 
 ECE140_WIFI wifi;
 ECE140_MQTT mqtt(CLIENT_ID, TOPIC_PREFIX);
+Microphone  mic;
+Preferences prefs;
+
+// Captive-portal identity: the AP the board broadcasts when no known network
+// can be joined, and the hostname it advertises on the network.
+const char* PORTAL_AP_NAME  = "ThermalSensor-Setup";
+const char* PORTAL_HOSTNAME = "wifimanager.duynq.com";
 
 
 // Candidate networks, tried in order until one associates. The primary
 // network comes from the build config (.env): it is treated as WPA2-Enterprise
-// when no non-enterprise password was supplied, otherwise as WPA-PSK. An
-// open campus network (UCSD-GUEST) is listed as a fallback. Order = priority.
+// when no non-enterprise password was supplied, otherwise as WPA-PSK. Open and
+// PSK campus networks are listed as fallbacks. Order = priority.
 
 enum WifiAuth { AUTH_OPEN, AUTH_PSK, AUTH_ENTERPRISE };
 
@@ -62,6 +72,8 @@ static bool connectToAnyWiFi() {
           primaryEnterprise ? AUTH_ENTERPRISE : AUTH_PSK,
           ucsdUsername,
           primaryEnterprise ? ucsdPassword.c_str() : nonEnterpriseWifiPassword },
+        // RESNET device guest network (WPA-PSK).
+        { "RESNET-GUEST-DEVICE", AUTH_PSK, nullptr, "ResnetConnect" },
         // Open campus guest fallback.
         { "UCSD-GUEST", AUTH_OPEN, nullptr, "" },
     };
@@ -128,6 +140,53 @@ static bool checkInternet() {
 }
 
 
+// WiFi bring-up strategy, in priority order:
+//   1. Credentials previously saved through the captive portal (NVS). This is
+//      how you switch networks without reflashing the board.
+//   2. The built-in candidate list (connectToAnyWiFi): .env primary ->
+//      RESNET guest -> UCSD-GUEST.
+//   3. Recovery: launch the WiFiManager captive portal so a new network can be
+//      entered from a browser; on success persist creds to NVS for step 1.
+static void setupWiFi() {
+    // 1. Portal-saved credentials (NVS). connectToWiFi handles open networks
+    //    (empty pass) and enforces its own connect timeout.
+    prefs.begin("wifi", /*readOnly=*/true);
+    String savedSsid = prefs.getString("ssid", "");
+    String savedPass = prefs.getString("pass", "");
+    prefs.end();
+    if (savedSsid.length() > 0) {
+        Serial.println("[WiFi] Trying saved (portal) credentials...");
+        if (wifi.connectToWiFi(savedSsid, savedPass)) {
+            return;
+        }
+    }
+
+    // 2. Built-in candidate list.
+    if (connectToAnyWiFi()) {
+        return;
+    }
+
+    // 3. Nothing connected — launch the captive portal. On success, persist the
+    //    entered credentials to NVS so the board reconnects automatically next
+    //    boot (step 1). On timeout, restart to retry the whole sequence.
+    Serial.printf("[WiFi] No known network — starting config portal \"%s\".\n", PORTAL_AP_NAME);
+    WiFiManager wm;
+    wm.setHostname(PORTAL_HOSTNAME);
+    wm.setConfigPortalTimeout(180);  // give up after 3 min
+    bool ok = wm.startConfigPortal(PORTAL_AP_NAME);
+    if (ok && WiFi.status() == WL_CONNECTED) {
+        prefs.begin("wifi", /*readOnly=*/false);
+        prefs.putString("ssid", wm.getWiFiSSID());
+        prefs.putString("pass", wm.getWiFiPass());
+        prefs.end();
+        Serial.println("[WiFi] Portal credentials saved to NVS.");
+    } else {
+        Serial.println("[WiFi] Config portal timed out — restarting.");
+        ESP.restart();
+    }
+}
+
+
 // Sensor
 
 Adafruit_AMG88xx amg;
@@ -147,10 +206,38 @@ TfLiteTensor* output_tensor = nullptr;
 float features[N_FEATURES];
 
 
-// Command state
+// --- Legacy command state (REPLACED by autonomous event recording) ----------
+// The device no longer waits for get_one / start_continuous / stop from the
+// server. Kept here (commented out) for reference; see the event pipeline below.
+//
+// enum Mode { IDLE, GET_ONE, CONTINUOUS };
+// volatile Mode currentMode = IDLE;
 
-enum Mode { IDLE, GET_ONE, CONTINUOUS };
-volatile Mode currentMode = IDLE;
+
+// --- Autonomous event recording ---------------------------------------------
+// The board samples the AMG8833 once per second and runs presence inference. A
+// debounced EMPTY->PRESENT transition starts an "event": a log message is sent
+// immediately (so the website can notify at detection), then one frame per
+// second is streamed until the area is empty (debounced) or the 5-minute cap is
+// hit, after which an event_end message is sent.
+
+static const uint32_t SAMPLE_INTERVAL_MS = 1000;    // 1 fps
+static const uint32_t MAX_EVENT_MS        = 300000;  // 5 min hard cap
+static const int      PRESENT_TO_START     = 2;      // consecutive present -> start
+static const int      EMPTY_TO_END         = 10;     // consecutive empty  -> end
+
+bool     eventActive     = false;
+String   currentEventUid = "";
+uint32_t eventStartMs    = 0;
+int      frameSeq        = 0;
+int      presentStreak   = 0;
+int      emptyStreak     = 0;
+uint32_t lastSampleMs    = 0;
+
+// Arm/disarm. When disarmed the camera stops sampling and recording (a manual
+// "off switch" from the web UI). Persisted in NVS so a disarmed device stays
+// disarmed across reboots rather than silently re-arming.
+bool armed = true;
 
 
 // TFLite: setupModel (reused from TA6)
@@ -308,57 +395,157 @@ float runInference(float scaled_features[N_FEATURES]) {
 }
 
 
-// Build and send one reading
+// --- Legacy single-reading publisher (REPLACED) ------------------------------
+// Old command-driven path: published one reading to <TOPIC>/thermal on demand.
+// Superseded by the event pipeline (startEvent / publishFrame / endEvent).
+// Kept for reference.
+//
+// void sendReading() {
+//     amg.readPixels(pixels);
+//     float thermistor = amg.readThermistor();
+//     computeFeatures(pixels, features);
+//     float confidence = runInference(features);
+//     bool present = confidence > 0.5f;
+//     String payload = "";
+//     payload.reserve(700);
+//     payload += "{\"mac_address\":\"";
+//     payload += WiFi.macAddress();
+//     payload += "\",\"pixels\":[";
+//     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+//         payload += String(pixels[i], 2);
+//         if (i < AMG88xx_PIXEL_ARRAY_SIZE - 1) payload += ",";
+//     }
+//     payload += "],\"thermistor\":";
+//     payload += String(thermistor, 2);
+//     payload += ",\"prediction\":\"";
+//     payload += present ? "PRESENT" : "EMPTY";
+//     payload += "\",\"confidence\":";
+//     payload += String(confidence, 4);
+//     payload += "}";
+//     mqtt.publishMessage("thermal", payload);
+// }
+//
+// Old command callback: server told the board what to do. No longer subscribed.
+//
+// void mqttCallback(char* topic, byte* payload, unsigned int length) {
+//     String msg;
+//     for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+//     if (msg == "get_one") currentMode = GET_ONE;
+//     else if (msg == "start_continuous") currentMode = CONTINUOUS;
+//     else if (msg == "stop") currentMode = IDLE;
+// }
 
-void sendReading() {
-    amg.readPixels(pixels);
-    float thermistor = amg.readThermistor();
 
-    computeFeatures(pixels, features);
-    float confidence = runInference(features);
-    bool present = confidence > 0.5f;
+// Event lifecycle publishers
 
-    Serial.printf("[%s] conf=%.3f therm=%.2fC\n",
-                  present ? "PRESENT" : "EMPTY  ", confidence, thermistor);
+// Announce a new presence event. Sent immediately on detection so the server
+// (and website) can notify right away, before any frames arrive.
+void startEvent(float triggerConfidence, float audioLevel) {
+    currentEventUid = WiFi.macAddress() + "-" + String(millis());
+    eventActive  = true;
+    eventStartMs = millis();
+    frameSeq     = 0;
 
-    // Build JSON payload matching server's expected format
+    String payload = "";
+    payload.reserve(200);
+    payload += "{\"type\":\"event_start\",\"event_uid\":\"";
+    payload += currentEventUid;
+    payload += "\",\"mac_address\":\"";
+    payload += WiFi.macAddress();
+    payload += "\",\"trigger_confidence\":";
+    payload += String(triggerConfidence, 4);
+    payload += ",\"audio_level\":";
+    payload += String(audioLevel, 4);
+    payload += "}";
+
+    mqtt.publishMessage("event", payload);
+    Serial.printf("[Event] START %s (conf=%.3f)\n", currentEventUid.c_str(), triggerConfidence);
+}
+
+// Stream one thermal frame belonging to the active event.
+void publishFrame(float thermistor, float confidence, float audioLevel) {
     String payload = "";
     payload.reserve(700);
-    payload += "{\"mac_address\":\"";
-    payload += WiFi.macAddress();
-    payload += "\",\"pixels\":[";
+    payload += "{\"event_uid\":\"";
+    payload += currentEventUid;
+    payload += "\",\"seq\":";
+    payload += String(frameSeq);
+    payload += ",\"pixels\":[";
     for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
         payload += String(pixels[i], 2);
         if (i < AMG88xx_PIXEL_ARRAY_SIZE - 1) payload += ",";
     }
     payload += "],\"thermistor\":";
     payload += String(thermistor, 2);
-    payload += ",\"prediction\":\"";
-    payload += present ? "PRESENT" : "EMPTY";
-    payload += "\",\"confidence\":";
+    payload += ",\"confidence\":";
     payload += String(confidence, 4);
+    payload += ",\"audio_level\":";
+    payload += String(audioLevel, 4);
     payload += "}";
 
-    mqtt.publishMessage("thermal", payload);
+    mqtt.publishMessage("frame", payload);
+    frameSeq++;
+}
+
+// Close out the active event.
+void endEvent(const char* reason) {
+    String payload = "";
+    payload.reserve(160);
+    payload += "{\"type\":\"event_end\",\"event_uid\":\"";
+    payload += currentEventUid;
+    payload += "\",\"frame_count\":";
+    payload += String(frameSeq);
+    payload += "}";
+
+    mqtt.publishMessage("event", payload);
+    Serial.printf("[Event] END   %s (%d frames, %s)\n",
+                  currentEventUid.c_str(), frameSeq, reason);
+
+    eventActive     = false;
+    currentEventUid = "";
+    presentStreak   = 0;
+    emptyStreak     = 0;
 }
 
 
-// MQTT command callback (pattern from TA4 challenge2)
+// Arm/disarm state
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
+// Report the current armed state so the server + website can reflect the
+// device's real status (not just an optimistic UI guess).
+void publishState() {
+    String payload = "{\"type\":\"state\",\"mac_address\":\"";
+    payload += WiFi.macAddress();
+    payload += "\",\"armed\":";
+    payload += armed ? "true" : "false";
+    payload += "}";
+    mqtt.publishMessage("event", payload);
+}
+
+void setArmed(bool value) {
+    if (value != armed) {
+        armed = value;
+        prefs.begin("cam", /*readOnly=*/false);
+        prefs.putBool("armed", armed);
+        prefs.end();
+        // Disarming mid-event: close it out cleanly.
+        if (!armed && eventActive) endEvent("disarmed");
+        presentStreak = 0;
+        emptyStreak   = 0;
+        Serial.printf("[Cam] %s\n", armed ? "ARMED" : "DISARMED");
+    }
+    publishState();  // always confirm, even on a no-op, so the UI syncs
+}
+
+// Command callback: the web "off switch" publishes arm / disarm here.
+void commandCallback(char* topic, byte* payload, unsigned int length) {
     String msg;
     msg.reserve(length + 1);
     for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+    msg.trim();
 
-    Serial.print("[MQTT] Command: "); Serial.println(msg);
-
-    if (msg == "get_one") {
-        currentMode = GET_ONE;
-    } else if (msg == "start_continuous") {
-        currentMode = CONTINUOUS;
-    } else if (msg == "stop") {
-        currentMode = IDLE;
-    }
+    if (msg == "disarm")   setArmed(false);
+    else if (msg == "arm") setArmed(true);
+    else Serial.printf("[Cam] Ignoring unknown command: %s\n", msg.c_str());
 }
 
 
@@ -370,7 +557,7 @@ void setup() {
 
     // WiFi (pattern from TA7 starter + TA4 challenge2)
     Serial.println("[Setup] Connecting to WiFi...");
-    connectToAnyWiFi();
+    setupWiFi();
     Serial.print("[Setup] MAC address: "); Serial.println(WiFi.macAddress());
 
     // Verify real internet access before attempting MQTT. A captive portal
@@ -386,7 +573,12 @@ void setup() {
         Serial.println("[Setup] MQTT connect failed, retrying...");
         delay(1000);
     }
-    mqtt.setCallback(mqttCallback);
+    // Restore armed state from NVS (default armed) and subscribe to the
+    // arm/disarm command channel (the web "off switch").
+    prefs.begin("cam", /*readOnly=*/true);
+    armed = prefs.getBool("armed", true);
+    prefs.end();
+    mqtt.setCallback(commandCallback);
     mqtt.subscribeTopic("command");
 
     // AMG8833 sensor (pattern from TA4 challenge2)
@@ -399,23 +591,67 @@ void setup() {
     }
     delay(100);
 
+    // Optional INMP441 microphone (redundant — firmware runs fine without it).
+    if (mic.begin()) {
+        Serial.println("[Setup] Microphone available.");
+    } else {
+        Serial.println("[Setup] Microphone not available — continuing without it.");
+    }
+
     // TFLite model (from TA6 lab_challenge)
     setupModel();
 
-    Serial.println("[Setup] Ready — waiting for commands");
+    publishState();  // announce armed/disarmed so the dashboard starts in sync
+    Serial.printf("[Setup] Ready — monitoring %s.\n", armed ? "ARMED" : "DISARMED");
 }
 
 
-// Loop
+// Loop — autonomous presence monitoring + event recording.
+//
+// Runs the MQTT client continuously, but only samples the sensor once per
+// SAMPLE_INTERVAL_MS. Each sample runs inference; a debounced presence signal
+// drives the event state machine.
 
 void loop() {
-    mqtt.loop();
+    mqtt.loop();  // keep the MQTT connection alive + process arm/disarm commands
 
-    if (currentMode == GET_ONE) {
-        sendReading();
-        currentMode = IDLE;
-    } else if (currentMode == CONTINUOUS) {
-        sendReading();
-        delay(1000);
+    // Disarmed: skip all sensing/recording but stay responsive to commands.
+    if (!armed) return;
+
+    uint32_t now = millis();
+    if (now - lastSampleMs < SAMPLE_INTERVAL_MS) return;
+    lastSampleMs = now;
+
+    // One thermal sample + inference (+ optional sound level).
+    amg.readPixels(pixels);
+    float thermistor = amg.readThermistor();
+    computeFeatures(pixels, features);
+    float confidence = runInference(features);
+    bool  present    = confidence > 0.5f;
+    float audioLevel = mic.readLevel();  // 0.0 when mic unavailable
+
+    // Debounce streaks.
+    if (present) { presentStreak++; emptyStreak = 0; }
+    else         { emptyStreak++;   presentStreak = 0; }
+
+    Serial.printf("[%s] conf=%.3f therm=%.2fC audio=%.3f %s\n",
+                  present ? "PRESENT" : "EMPTY  ", confidence, thermistor, audioLevel,
+                  eventActive ? "(recording)" : "");
+
+    if (!eventActive) {
+        // Idle: start an event once presence is confirmed.
+        if (presentStreak >= PRESENT_TO_START) {
+            startEvent(confidence, audioLevel);
+            publishFrame(thermistor, confidence, audioLevel);  // frame 0 = trigger frame
+        }
+    } else {
+        // Recording: stream frames, then close on empty debounce or 5-min cap.
+        publishFrame(thermistor, confidence, audioLevel);
+
+        if (emptyStreak >= EMPTY_TO_END) {
+            endEvent("empty");
+        } else if (now - eventStartMs >= MAX_EVENT_MS) {
+            endEvent("max_duration");
+        }
     }
 }

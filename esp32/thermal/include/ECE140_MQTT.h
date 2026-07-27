@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <vector>
 
 /**
  * @brief This is the class to handle MQTT communications with a public broker.
@@ -70,7 +71,14 @@ private:
     const char* _broker = "broker.emqx.io";
     bool _isTLS;
 
+    // Remembered so they survive an automatic reconnect: the broker forgets
+    // subscriptions on disconnect, and a fresh session needs the callback set.
+    void (*_callback)(char*, uint8_t*, unsigned int) = nullptr;
+    std::vector<String> _subscriptions;
+    int _port = 1883;
+
     void _setupMQTTClient(int port);
+    void _restoreSession();
 };
 
 #endif

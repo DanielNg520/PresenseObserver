@@ -3,20 +3,51 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>AMG8833 Thermal Dashboard (in a better than standard CSS formatting)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presence Observer — thermal presence dashboard</title>
+    <meta name="description" content="Real-time thermal presence detection and event recording dashboard for an ESP32-S3 + AMG8833 sensor node.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23fff'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 
 <body>
-    <header>
-        <h1>AMG8833 Thermal Dashboard (in a better than standard CSS formatting)</h1>
-        <div id="status" class="status-badge">Connecting...</div>
+    <!-- Top bar -->
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <div class="brand-text">
+                <h1>Presence Observer</h1>
+                <p>Thermal presence detection &amp; event recording</p>
+            </div>
+        </div>
+        <nav class="topnav">
+            <a href="#live">Live</a>
+            <a href="#events">Events</a>
+            <a href="#data">Data</a>
+        </nav>
+        <div class="arm-control">
+            <label class="switch" title="Arm or disarm the camera">
+                <input type="checkbox" id="arm-toggle" checked onchange="setArm(this.checked)">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+            <span id="arm-label" class="arm-label armed">Armed</span>
+        </div>
+        <div id="status" class="status-badge">
+            <span class="status-dot" aria-hidden="true"></span><span class="status-text">Connecting…</span>
+        </div>
     </header>
 
+    <!-- Live presence-detection toast: shown the instant an event_start arrives -->
+    <div id="event-toast" class="event-toast hidden"></div>
+
     <main>
-        <!-- Live Sensor Panel -->
-        <section class="card">
-            <h2>Live Sensor</h2>
+        <!-- Live monitor -->
+        <section id="live" class="card accent-live">
+            <div class="card-head">
+                <h2><span class="dot" aria-hidden="true"></span>Live monitor</h2>
+                <span class="hint">Streaming at 1&nbsp;fps while active</span>
+            </div>
+
             <div class="live-grid">
                 <div class="heatmap-wrap">
                     <canvas id="heatmap" width="320" height="320"></canvas>
@@ -26,56 +57,104 @@
                         <span id="temp-max">--</span>
                     </div>
                 </div>
+
                 <div class="live-info">
-                    <div class="info-box">
-                        <label>Thermistor</label>
-                        <span id="thermistor">--</span>
-                        <small>&deg;C</small>
-                    </div>
                     <div class="info-box prediction-box" id="prediction-box">
-                        <label>Prediction</label>
+                        <label>Current state</label>
                         <span id="prediction">--</span>
                     </div>
                     <div class="info-box">
                         <label>Confidence</label>
                         <span id="confidence">--</span>
+                        <div class="meter"><div id="confidence-bar" class="meter-fill"></div></div>
+                    </div>
+                    <div class="info-box">
+                        <label>Thermistor</label>
+                        <span id="thermistor">--</span><small>&deg;C</small>
                     </div>
                     <div class="info-box">
                         <label>Device MAC</label>
                         <span id="mac" class="mono">--</span>
                     </div>
+                    <p class="note">Autonomous mode — the device records presence events on its own.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Presence events -->
+        <section id="events" class="card accent-events">
+            <div class="card-head">
+                <h2><span class="dot" aria-hidden="true"></span>Presence events</h2>
+                <div class="toolbar">
+                    <input id="filter-event-mac" type="text" placeholder="Filter by MAC…" />
+                    <button class="btn-ghost" onclick="loadEvents()">Refresh</button>
+                    <button class="btn-ghost" onclick="clearEventFilter()">Clear</button>
+                </div>
+            </div>
+            <div id="events-summary" class="metric-row"></div>
+            <div id="events-container" class="table-scroll">
+                <p class="empty-msg">No events yet.</p>
+            </div>
+        </section>
+
+        <!-- Secondary data: legacy readings + devices -->
+        <section id="data" class="grid-2">
+            <div class="card accent-data">
+                <div class="card-head">
+                    <h2><span class="dot" aria-hidden="true"></span>Stored readings <span class="badge-legacy">legacy</span></h2>
+                    <div class="toolbar">
+                        <input id="filter-mac" type="text" placeholder="Filter by MAC…" />
+                        <button class="btn-ghost" onclick="loadReadings()">Refresh</button>
+                        <button class="btn-ghost" onclick="clearFilter()">Clear</button>
+                    </div>
+                </div>
+                <div id="readings-container" class="table-scroll">
+                    <p class="empty-msg">No readings loaded yet.</p>
                 </div>
             </div>
 
-            <div class="controls">
-                <button id="btn-get-one" onclick="sendCommand('get_one')">Get One</button>
-                <button id="btn-start" onclick="sendCommand('start_continuous')">Start Continuous</button>
-                <button id="btn-stop" onclick="sendCommand('stop')" class="btn-danger">Stop</button>
-            </div>
-        </section>
-
-        <!-- Database Readings Panel -->
-        <section class="card">
-            <h2>Stored Readings</h2>
-            <div class="db-controls">
-                <input id="filter-mac" type="text" placeholder="Filter by MAC address..." />
-                <button onclick="loadReadings()">Refresh</button>
-                <button onclick="clearFilter()">Clear Filter</button>
-            </div>
-            <div id="readings-container">
-                <p class="empty-msg">No readings loaded yet.</p>
-            </div>
-        </section>
-
-        <!-- Devices Panel -->
-        <section class="card">
-            <h2>Registered Devices</h2>
-            <button onclick="loadDevices()">Refresh</button>
-            <div id="devices-container">
-                <p class="empty-msg">No devices found.</p>
+            <div class="card accent-devices">
+                <div class="card-head">
+                    <h2><span class="dot" aria-hidden="true"></span>Devices</h2>
+                    <div class="toolbar">
+                        <button class="btn-ghost" onclick="loadDevices()">Refresh</button>
+                    </div>
+                </div>
+                <div id="devices-container" class="table-scroll">
+                    <p class="empty-msg">No devices found.</p>
+                </div>
             </div>
         </section>
     </main>
+
+    <footer class="site-footer">
+        <span>Presence Observer</span>
+        <span class="sep">·</span>
+        <span>ESP32-S3 + AMG8833 · on-device TFLite · MQTT · FastAPI</span>
+    </footer>
+
+    <!-- Playback modal: animates an event's thermal frame series -->
+    <div id="playback-modal" class="modal hidden">
+        <div class="modal-body">
+            <div class="modal-head">
+                <h3 id="playback-title">Event playback</h3>
+                <button class="btn-close" onclick="closePlayback()" aria-label="Close">&times;</button>
+            </div>
+            <div class="heatmap-wrap">
+                <canvas id="playback-heatmap" width="320" height="320"></canvas>
+                <div class="temp-scale">
+                    <span id="pb-temp-min">--</span>
+                    <div class="gradient-bar"></div>
+                    <span id="pb-temp-max">--</span>
+                </div>
+            </div>
+            <div class="playback-controls">
+                <button id="pb-play" class="btn-ghost" onclick="togglePlay()">Pause</button>
+                <input id="pb-scrub" type="range" min="0" max="0" value="0" oninput="scrubTo(this.value)" />
+                <span id="pb-frame-label" class="mono">0 / 0</span>
+            </div>
+        </div>
+    </div>
 
     <script src="{{ url_for('static', path='script.js') }}"></script>
 </body>

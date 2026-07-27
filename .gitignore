@@ -3,8 +3,16 @@ CLAUDE.md
 MIGRATION_NOTES*
 PROJECT_OVERVIEW.md
 
+# Secrets — never commit real credentials. Use the *.example templates instead.
+.env
+**/.env
+
 # macOS
 .DS_Store
 
 # PlatformIO
 .pio/
+
+# Python
+__pycache__/
+*.pyc
